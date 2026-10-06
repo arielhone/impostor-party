@@ -1,0 +1,84 @@
+rules_version = '2';
+
+// מי האימפוסטר — כללי אבטחה
+// העיקרון: השרת (Firestore) הוא זה ששומר על הסודות.
+//  - כל שחקן יכול לקרוא רק את השאלה של עצמו (secrets/{uid}).
+//  - התשובות נעולות לקריאה כל עוד שלב המענה פתוח.
+//  - ההצבעות נחשפות לכולם רק בשלב התוצאות.
+//  - זהות האימפוסטר והשאלה הרגילה נשמרות במסמך שרק המנהל רואה.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function room(code) { return get(/databases/$(database)/documents/rooms/$(code)).data; }
+    function isHost(code) { return signedIn() && room(code).hostUid == request.auth.uid; }
+    function playerExists(code, uid) { return exists(/databases/$(database)/documents/rooms/$(code)/players/$(uid)); }
+    // סגירת חדר: המנהל העביר את החדר לשלב closing ומוחק את כל התוכן
+    function closing(code) { return isHost(code) && room(code).phase == 'closing'; }
+
+    match /rooms/{code} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.hostUid == request.auth.uid
+        && request.resource.data.phase == 'lobby';
+      allow update: if signedIn() && (
+        // המנהל: כל עדכון. מותר להעביר את התפקיד רק לשחקן שנמצא בחדר.
+        (resource.data.hostUid == request.auth.uid
+          && (request.resource.data.hostUid == resource.data.hostUid
+              || playerExists(code, request.resource.data.hostUid)))
+        ||
+        // השתלטות: שחקן בחדר לוקח לעצמו את התפקיד, רק כשהמנהל יצא או לא מגיב 30 שניות
+        (request.resource.data.hostUid == request.auth.uid
+          && playerExists(code, request.auth.uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['hostUid', 'hostSeenAt'])
+          && (!playerExists(code, resource.data.hostUid)
+              || !('hostSeenAt' in resource.data)
+              || request.time > resource.data.hostSeenAt + duration.value(30, 's')))
+      );
+      // רק המנהל, ורק אחרי שהחדר עבר לשלב סגירה (והתוכן נמחק)
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid
+        && resource.data.phase == 'closing';
+
+      match /players/{uid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.auth.uid == uid
+          && request.resource.data.score == 0;
+        // שחקן יכול לעדכן אצלו רק שדות סטטוס, לא ניקוד. המנהל יכול הכל.
+        allow update: if isHost(code)
+          || (signedIn() && request.auth.uid == uid
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['name', 'answeredRound', 'readyRound', 'votedRound', 'seenAt']));
+        allow delete: if isHost(code) || (signedIn() && request.auth.uid == uid);
+      }
+
+      match /secrets/{uid} {
+        allow read: if (signedIn() && request.auth.uid == uid) || closing(code);
+        allow write: if isHost(code);
+      }
+
+      match /hostOnly/{docId} {
+        allow read, write: if isHost(code);
+      }
+
+      match /answers/{uid} {
+        allow read: if signedIn() && room(code).phase != 'answering';
+        allow write: if signedIn() && request.auth.uid == uid
+          && room(code).phase == 'answering'
+          && request.resource.data.round == room(code).round
+          && uid in room(code).participants;
+        allow delete: if closing(code);
+      }
+
+      match /votes/{uid} {
+        allow read: if isHost(code) || (signedIn() && room(code).phase == 'results');
+        allow write: if signedIn() && request.auth.uid == uid
+          && room(code).phase == 'voting'
+          && request.resource.data.round == room(code).round
+          && uid in room(code).participants
+          && request.resource.data.target != uid;
+        allow delete: if closing(code);
+      }
+    }
+  }
+}

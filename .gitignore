@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Firebase local cache / emulator data
+.firebase/
+*-debug.log
+firebase-debug.*.log
+ui-debug.log
+
+# Secrets (never commit)
+.env
+.env.*
+*.pem
+*.key
+serviceAccount*.json
+*-service-account*.json
+*firebase-adminsdk*.json
+
+# Tooling artifacts
+.playwright-mcp/
+test-results/
+playwright-report/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

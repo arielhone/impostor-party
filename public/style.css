@@ -154,9 +154,52 @@ input:focus, select:focus { border-color: var(--accent); }
 @keyframes fade { 50% { opacity: .45; } }
 @keyframes beat { 50% { transform: scale(1.06); } }
 
+.btn.danger { background: var(--accent); border-color: transparent; color: #fff; }
+.disc-hint { margin: -8px 0 0; }
+.disc-hint b { color: var(--text); }
+
 /* ---------- toast ---------- */
 .toast {
-  position: fixed; left: 50%; bottom: calc(90px + env(safe-area-inset-bottom)); transform: translateX(-50%);
-  background: #000c; color: #fff; padding: 10px 18px; border-radius: 99px; font-size: .95rem; z-index: 50;
-  max-width: 90vw; text-align: center;
+  --tc: var(--accent2);
+  position: fixed; left: 50%; top: calc(12px + env(safe-area-inset-top)); z-index: 60;
+  display: flex; align-items: center; gap: 10px;
+  width: max-content; max-width: min(92vw, 480px);
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-inline-start: 4px solid var(--tc);
+  border-radius: 14px; padding: 12px 16px 12px 14px;
+  font-size: .95rem; font-weight: 500; line-height: 1.4;
+  box-shadow: 0 12px 32px -8px #000a;
+  opacity: 0; transform: translate(-50%, -12px);
+  transition: opacity .2s, transform .25s cubic-bezier(.2, .8, .3, 1.2);
+  pointer-events: none;
 }
+.toast[hidden] { display: none; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.ok { --tc: var(--good); }
+.toast.err { --tc: var(--accent); }
+.ticon {
+  flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--tc); color: var(--bg); font-size: .8rem; font-weight: 900;
+}
+
+/* ---------- confirm dialog ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 70;
+  display: grid; place-items: center; padding: 16px;
+  background: #0a0812b3; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  animation: fadein .16s both;
+}
+.modal {
+  width: 100%; max-width: 380px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px 18px 18px; text-align: center;
+  box-shadow: 0 24px 60px -12px #000c;
+  animation: rise .2s both;
+}
+.modal h2 { font-size: 1.25rem; margin: 0; }
+.modal p { margin: 8px 0 0; line-height: 1.5; }
+.modal .row { margin-top: 20px; }
+.modal-backdrop.out { animation: fadeout .16s both; }
+@keyframes fadein { from { opacity: 0; } }
+@keyframes fadeout { to { opacity: 0; } }

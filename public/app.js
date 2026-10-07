@@ -50,6 +50,8 @@ const BEAT_MS = 10000;      // תדירות פעימת המנהל
 const STALE_MS = 30000;     // אחרי כמה זמן בלי פעימה אפשר להשתלט (תואם ל-firestore.rules)const STAGGER_MS = 15000;   // השהיה נוספת לכל מועמד בתור
 const SEEN_MS = 15000;      // כל שחקן מעדכן seenAt בתדירות הזו
 const GHOST_MS = 30000;     // שחקן שלא נראה זמן כזה נחשב שסגר את הטלפון
+const DEFAULT_DISC_SEC = 120; // זמן דיון ברירת מחדל
+const MIN_DISC_MS = 30000;  // לפני זה עוברים להצבעה רק אם *כולם* מוכנים; אחרי זה מספיק רוב
 
 const $ = (s) => document.querySelector(s);
 const app = $("#app");
@@ -81,13 +83,63 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// הודעה קצרה בראש המסך. type: "info" | "ok" | "err"
 let toastTimer;
-function toast(msg) {
+function toast(msg, type = "info") {
   const t = $("#toast");
-  t.textContent = msg;
+  const icon = { ok: "✓", err: "!", info: "i" }[type] || "i";
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span class="ticon">${icon}</span><span>${esc(msg)}</span>`;
   t.hidden = false;
+  void t.offsetWidth; // מאתחל את האנימציה גם כשהודעה מחליפה הודעה
+  t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 2600);
+  toastTimer = setTimeout(() => {
+    t.classList.remove("show");
+    toastTimer = setTimeout(() => (t.hidden = true), 250);
+  }, type === "err" ? 3600 : 2600);
+}
+
+// הודעת שגיאה קריאה במקום קוד של Firebase
+function errText(e) {
+  const code = e?.code || "";
+  if (code.includes("permission-denied")) return "אין הרשאה לפעולה הזו. ייתכן שהמנהל התחלף";
+  if (code.includes("unavailable") || code.includes("network")) return "אין חיבור לשרת. בדוק את האינטרנט ונסה שוב";
+  return "משהו השתבש. נסה שוב";
+}
+
+// חלון אישור מעוצב במקום confirm() של הדפדפן. מחזיר true אם אישרו.
+function ask({ title, text = "", ok = "אישור", cancel = "ביטול", danger = false }) {
+  return new Promise((resolve) => {
+    const el = document.createElement("div");
+    el.className = "modal-backdrop";
+    el.innerHTML = `<div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="mTitle">
+      <h2 id="mTitle">${esc(title)}</h2>
+      ${text ? `<p class="muted">${esc(text)}</p>` : ""}
+      <div class="row">
+        <button class="btn grow ${danger ? "danger" : "primary"}" data-m="ok">${esc(ok)}</button>
+        <button class="btn ghost grow" data-m="cancel">${esc(cancel)}</button>
+      </div>
+    </div>`;
+    let closed = false;
+    const done = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener("keydown", onKey);
+      el.classList.add("out");
+      setTimeout(() => el.remove(), 160);
+      resolve(v);
+    };
+    const onKey = (e) => { if (e.key === "Escape") done(false); };
+    el.addEventListener("click", (e) => {
+      const m = e.target.closest("[data-m]")?.dataset.m;
+      if (m) done(m === "ok");
+      else if (e.target === el) done(false); // לחיצה מחוץ לחלון
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(el);
+    el.querySelector("[data-m=ok]").focus();
+  });
 }
 
 function vibrate(ms = 60) { try { navigator.vibrate?.(ms); } catch {} }
@@ -132,10 +184,10 @@ async function createRoom(name) {
     if (!snap.exists()) break;
     code = null;
   }
-  if (!code) return toast("לא הצלחתי ליצור חדר, נסה שוב");
+  if (!code) return toast("לא הצלחתי ליצור חדר. נסה שוב", "err");
   await setDoc(doc(db, "rooms", code), {
     hostUid: S.me, phase: "lobby", round: 0, participants: [],
-    discussionSec: 180, createdAt: Date.now(), result: null, normalQuestion: null, discussionEndsAt: null,
+    discussionSec: DEFAULT_DISC_SEC, createdAt: Date.now(), result: null, normalQuestion: null, discussionEndsAt: null, discussionStartedAt: null,
     hostSeenAt: serverTimestamp(),
   });
   await setDoc(doc(db, "rooms", code, "players", S.me), { name, score: 0, joinedAt: Date.now(), seenAt: serverTimestamp() });
@@ -145,7 +197,7 @@ async function createRoom(name) {
 async function joinRoom(code, name) {
   code = code.toUpperCase().trim();
   const snap = await getDoc(doc(db, "rooms", code));
-  if (!snap.exists()) return toast("לא מצאתי חדר עם הקוד הזה");
+  if (!snap.exists()) return toast("לא מצאתי חדר עם הקוד הזה", "err");
   const pRef = doc(db, "rooms", code, "players", S.me);
   const p = await getDoc(pRef);
   if (p.exists()) await updateDoc(pRef, { name });
@@ -168,7 +220,7 @@ async function enterRoom(code) {
     if (prev && onlyHeartbeatChanged(prev, S.room)) return;
     if (prev && prev.hostUid !== S.room.hostUid && S.room.hostUid === S.me) {
       S.lastBeat = 0;
-      toast("אתה המנהל עכשיו 👑");
+      toast("אתה המנהל עכשיו 👑", "ok");
     }
     if (S.room.phase !== prevPhase || S.room.round !== prevRound) onPhaseChange(prevPhase);
     render();
@@ -218,7 +270,7 @@ function leaveLocal(msg) {
 }
 
 async function leaveRoom() {
-  if (!confirm("לצאת מהחדר?")) return;
+  if (!(await ask({ title: "לצאת מהחדר?", text: !isHost() ? "" : hostCandidates().length ? "תפקיד המנהל יעבור לשחקן אחר." : "אין שחקנים מחוברים נוספים, אז החדר ייסגר.", ok: "יציאה", danger: true }))) return;
   // מנהל שיוצא מעביר את התפקיד לשחקן הוותיק ביותר; אם לא נשאר אף אחד מחובר — סוגר את החדר
   if (isHost()) {
     let next = hostCandidates()[0];
@@ -324,7 +376,7 @@ function onPhaseChange(prev) {
   if (ph === "answering") {
     S.voteChoice = null; vibrate();
     const a = $("#ansIn"); if (a) a.value = ""; // לא להשאיר תשובה לשאלה הקודמת
-    if (prev === "answering") toast("השאלה הוחלפה 🔄");
+    if (prev === "answering") toast("המנהל החליף את השאלה. יש לך שאלה חדשה");
   }
   if (ph === "discussion" || ph === "voting" || ph === "results") vibrate(ph === "results" ? 200 : 60);
   if (PHASES_WITH_ANSWERS.includes(ph) && S.answers.round !== S.room.round) loadAnswers();
@@ -350,7 +402,7 @@ async function loadAnswers() {
 // ---------- Player actions ----------
 async function submitAnswer(text) {
   text = text.trim();
-  if (!text) return toast("כתוב תשובה");
+  if (!text) return toast("כתוב תשובה לפני השליחה", "err");
   const r = S.room.round;
   await setDoc(subDoc("answers", S.me), { round: r, text: text.slice(0, 80), name: nameOf(S.me), at: Date.now() });
   await updateDoc(subDoc("players", S.me), { answeredRound: r });
@@ -362,7 +414,7 @@ async function readyToVote() {
 }
 
 async function submitVote() {
-  if (!S.voteChoice) return toast("בחר חשוד");
+  if (!S.voteChoice) return toast("בחר את מי אתה חושד", "err");
   const r = S.room.round;
   await setDoc(subDoc("votes", S.me), { round: r, target: S.voteChoice });
   await updateDoc(subDoc("players", S.me), { votedRound: r });
@@ -373,7 +425,7 @@ async function submitVote() {
 async function hostDo(fn) {
   if (S.hostBusy) return;
   S.hostBusy = true;
-  try { await fn(); } catch (e) { console.error(e); toast("שגיאה: " + (e.code || e.message)); }
+  try { await fn(); } catch (e) { console.error(e); toast(errText(e), "err"); }
   finally { S.hostBusy = false; }
 }
 
@@ -389,8 +441,10 @@ function hostTick() {
       if (act.every((u) => S.players[u].answeredRound === r)) hostDo(goDiscussion);
       break;
     case "discussion": {
+      // ב-30 השניות הראשונות צריך את כולם; אחרי זה רוב; ובסוף הטיימר עוברים בכל מקרה
       const ready = act.filter((u) => S.players[u].readyRound === r).length;
-      if (Date.now() >= S.room.discussionEndsAt || ready > act.length / 2) hostDo(goVoting);
+      const enough = discEarly() ? ready === act.length : ready > act.length / 2;
+      if (Date.now() >= S.room.discussionEndsAt || enough) hostDo(goVoting);
       break;
     }
     case "voting":
@@ -398,6 +452,11 @@ function hostTick() {
       break;
   }
 }
+
+// כמה זמן עבר מתחילת הדיון. חדר שהתחיל דיון לפני שנוסף discussionStartedAt — מחשבים מהטיימר.
+const discElapsed = () => Date.now() -
+  (S.room.discussionStartedAt ?? S.room.discussionEndsAt - (S.room.discussionSec || DEFAULT_DISC_SEC) * 1000);
+const discEarly = () => discElapsed() < MIN_DISC_MS;
 
 // אחרי שהטאב הוקפא ברקע, נתוני "מי מחובר" ישנים — מחכים לעדכון טרי (עד 16 שניות, סבב פעימות אחד)
 const syncing = () => S.awaitSync && Date.now() - S.awaitSync < 16000;
@@ -407,10 +466,10 @@ async function startRound({ reroll = false } = {}) {
   // רק שחקנים מחוברים — מי שסגר את הטלפון לא נכנס לסיבוב ולא יכול להיות אימפוסטר
   if (syncing()) return toast("מתחבר מחדש… נסה שוב בעוד רגע");
   const ids = Object.keys(S.players).filter(isAlive);
-  if (ids.length < 3) return toast("צריך לפחות 3 שחקנים מחוברים");
+  if (ids.length < 3) return toast("צריך לפחות 3 שחקנים מחוברים", "err");
 
   const cq = reroll ? "" : $("#customQ")?.value.trim(), ci = reroll ? "" : $("#customImp")?.value.trim();
-  if (!!cq !== !!ci) return toast("מלא את שתי השאלות, או השאר את שתיהן ריקות");
+  if (!!cq !== !!ci) return toast("מלא את שתי השאלות, או השאר את שתיהן ריקות", "err");
   // (2) רשימת השאלות שכבר היו נשמרת רק אצל המנהל — במסמך החדר היא חושפת את השאלה הנוכחית
   const prevState = (await getDoc(subDoc("hostOnly", "state"))).data();
   let pair, used = prevState?.usedQ || S.room.usedQ || [];
@@ -436,7 +495,7 @@ async function startRound({ reroll = false } = {}) {
   b.update(roomRef(), {
     phase: "answering", round: r, participants: ids, usedQ: deleteField(),
     skipped: (S.room.skipped || 0) + (reroll ? 1 : 0),
-    normalQuestion: null, result: null, discussionEndsAt: null,
+    normalQuestion: null, result: null, discussionEndsAt: null, discussionStartedAt: null,
   });
   await b.commit();
   if ($("#customQ")) { $("#customQ").value = ""; $("#customImp").value = ""; }
@@ -448,7 +507,8 @@ async function goDiscussion() {
   await updateDoc(roomRef(), {
     phase: "discussion",
     normalQuestion: hs.normalQ,
-    discussionEndsAt: Date.now() + (S.room.discussionSec || 180) * 1000,
+    discussionStartedAt: Date.now(),
+    discussionEndsAt: Date.now() + (S.room.discussionSec || DEFAULT_DISC_SEC) * 1000,
   });
 }
 
@@ -500,7 +560,7 @@ async function backToLobby() {
 }
 
 async function kick(uid) {
-  if (!confirm(`להוציא את ${nameOf(uid)} מהחדר?`)) return;
+  if (!(await ask({ title: `להוציא את ${nameOf(uid)}?`, text: "השחקן יוצא מהחדר והניקוד שלו נמחק.", ok: "הוצאה", danger: true }))) return;
   await deleteDoc(subDoc("players", uid));
 }
 
@@ -673,11 +733,19 @@ function discussionView() {
     <div class="question">${esc(S.room.normalQuestion)}</div>
   </section>
   <div class="timer" id="timer">${fmt(S.room.discussionEndsAt - Date.now())}</div>
+  <p class="disc-hint muted small center-text" id="discHint">${discHint()}</p>
   ${answersTable()}
   ${inRound() ? `<button class="btn ${ready ? "ghost" : "primary"} big sticky" data-act="ready" ${ready ? "disabled" : ""}>
-      ${ready ? `✔ מוכן (${p.done}/${p.total}, צריך רוב)` : `🗳️ מוכן להצביע (${p.done}/${p.total})`}
+      ${ready ? `✔ מוכן (${p.done}/${p.total})` : `🗳️ מוכן להצביע (${p.done}/${p.total})`}
     </button>` : ""}
-  ${isHost() ? `<button class="btn ghost small" data-act="force-vote">עבור להצבעה עכשיו</button>` : ""}`;
+  ${isHost() ? `<button class="btn ghost small" data-act="force-vote" ${discEarly() ? "disabled" : ""}>עבור להצבעה עכשיו</button>` : ""}`;
+}
+
+// מה צריך כדי לעבור להצבעה לפני שהטיימר נגמר
+function discHint() {
+  return discEarly()
+    ? `מעבר מוקדם להצבעה רק אם <b>כולם</b> מוכנים · עוד ${fmt(MIN_DISC_MS - discElapsed())} יספיק רוב`
+    : `עוברים להצבעה כש<b>רוב</b> השחקנים מוכנים`;
 }
 
 function votingView() {
@@ -817,6 +885,10 @@ setInterval(() => {
     const t = $("#timer");
     const left = S.room.discussionEndsAt - Date.now();
     if (t) { t.textContent = fmt(left); t.classList.toggle("urgent", left < 30000); }
+    // עברו 30 השניות הראשונות — לרנדר כדי לפתוח את כפתור המנהל
+    const button = $("[data-act=force-vote]");
+    if (button && button.disabled !== discEarly()) render();
+    else { const h = $("#discHint"); if (h) h.innerHTML = discHint(); }
   }
   hostKeepalive();
   hostTick();
@@ -829,7 +901,7 @@ app.addEventListener("click", async (e) => {
   const act = el.dataset.act;
   const getName = () => {
     const n = $("#nameIn")?.value.trim();
-    if (!n) { toast("כתוב שם"); return null; }
+    if (!n) { toast("כתוב את השם שלך", "err"); return null; }
     safeSet("impostor:name", n);
     return n;
   };
@@ -840,13 +912,13 @@ app.addEventListener("click", async (e) => {
       case "join": {
         const n = getName(); const c = $("#codeIn")?.value.trim();
         if (!n) break;
-        if (!c || c.length !== 4) { toast("קוד של 4 אותיות"); break; }
+        if (!c || c.length !== 4) { toast("קוד החדר הוא 4 אותיות", "err"); break; }
         el.disabled = true; try { await joinRoom(c, n); } finally { if (!S.code) el.disabled = false; } break;
       }
       case "share": {
         const url = el.dataset.url;
         if (navigator.share) await navigator.share({ title: "מי האימפוסטר?", text: `בוא לשחק! קוד: ${S.code}`, url }).catch(() => {});
-        else { await navigator.clipboard?.writeText(url); toast("הקישור הועתק"); }
+        else { await navigator.clipboard?.writeText(url); toast("הקישור הועתק", "ok"); }
         break;
       }
       case "kick": await kick(el.dataset.uid); break;
@@ -854,18 +926,27 @@ app.addEventListener("click", async (e) => {
       case "start": hostDo(startRound); break;
       case "lobby": hostDo(backToLobby); break;
       case "answer": await submitAnswer($("#ansIn")?.value || ""); break;
-      case "force-reveal": if (confirm("לחשוף בלי לחכות לכולם?")) hostDo(goDiscussion); break;
+      case "force-reveal":
+        if (await ask({ title: "לחשוף עכשיו?", text: "מי שעוד לא ענה יישאר בלי תשובה בסיבוב הזה.", ok: "חשוף" })
+          && S.room?.phase === "answering") hostDo(goDiscussion);
+        break;
       case "discussion": hostDo(goDiscussion); break;
       case "ready": await readyToVote(); break;
-      case "skip-q": if (confirm("להחליף שאלה? כולם יקבלו שאלה חדשה ואימפוסטר חדש.")) hostDo(() => startRound({ reroll: true })); break;
-      case "force-vote": hostDo(goVoting); break;
+      case "skip-q":
+        if (await ask({ title: "להחליף שאלה?", text: "כל השחקנים יקבלו זוג שאלות חדש, ויוגרל אימפוסטר חדש. תשובות שכבר נשלחו יימחקו.", ok: "🔄 החלף שאלה" })
+          && S.room?.phase === "answering") hostDo(() => startRound({ reroll: true }));
+        break;
+      case "force-vote": if (S.room?.phase === "discussion" && !discEarly()) hostDo(goVoting); break;
       case "choose": S.voteChoice = el.dataset.uid; render(); break;
       case "vote": await submitVote(); break;
-      case "force-results": if (confirm("לסגור את ההצבעה?")) hostDo(goResults); break;
+      case "force-results":
+        if (await ask({ title: "לסגור את ההצבעה?", text: "מי שעוד לא הצביע לא ייספר.", ok: "סגור הצבעה" })
+          && S.room?.phase === "voting") hostDo(goResults);
+        break;
     }
   } catch (err) {
     console.error(err);
-    toast("שגיאה: " + (err.code || err.message));
+    toast(errText(err), "err");
     el.disabled = false;
   }
 });

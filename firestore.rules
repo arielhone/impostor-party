@@ -14,6 +14,11 @@ service cloud.firestore {
     function room(code) { return get(/databases/$(database)/documents/rooms/$(code)).data; }
     function isHost(code) { return signedIn() && room(code).hostUid == request.auth.uid; }
     function playerExists(code, uid) { return exists(/databases/$(database)/documents/rooms/$(code)/players/$(uid)); }
+    // שחקן ששלח פעימת "אני חי" (seenAt) ב-30 השניות האחרונות, לפי שעון השרת
+    function playerAlive(code, uid) {
+      let p = get(/databases/$(database)/documents/rooms/$(code)/players/$(uid)).data;
+      return 'seenAt' in p && request.time < p.seenAt + duration.value(30, 's');
+    }
     // סגירת חדר: המנהל העביר את החדר לשלב closing ומוחק את כל התוכן
     function closing(code) { return isHost(code) && room(code).phase == 'closing'; }
 
@@ -28,12 +33,13 @@ service cloud.firestore {
           && (request.resource.data.hostUid == resource.data.hostUid
               || playerExists(code, request.resource.data.hostUid)))
         ||
-        // השתלטות: שחקן בחדר לוקח לעצמו את התפקיד, רק כשהמנהל יצא או לא מגיב 30 שניות
+        // השתלטות: שחקן מחובר בחדר לוקח לעצמו את התפקיד, רק כשהמנהל יצא או לא מגיב 30 שניות.
+        // (סדר התור בין המועמדים נקבע בלקוח בלבד — השרת לא אוכף אותו.)
         (request.resource.data.hostUid == request.auth.uid
-          && playerExists(code, request.auth.uid)
+          && playerAlive(code, request.auth.uid)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['hostUid', 'hostSeenAt'])
+          && request.resource.data.hostSeenAt == request.time
           && (!playerExists(code, resource.data.hostUid)
-              || !('hostSeenAt' in resource.data)
               || request.time > resource.data.hostSeenAt + duration.value(30, 's')))
       );
       // רק המנהל, ורק אחרי שהחדר עבר לשלב סגירה (והתוכן נמחק)

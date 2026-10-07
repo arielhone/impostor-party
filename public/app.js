@@ -47,8 +47,7 @@ const S = {
 };
 
 const BEAT_MS = 10000;      // תדירות פעימת המנהל
-const STALE_MS = 30000;     // אחרי כמה זמן בלי פעימה אפשר להשתלט (תואם ל-firestore.rules)
-const STAGGER_MS = 15000;   // השהיה נוספת לכל מועמד בתור
+const STALE_MS = 30000;     // אחרי כמה זמן בלי פעימה אפשר להשתלט (תואם ל-firestore.rules)const STAGGER_MS = 15000;   // השהיה נוספת לכל מועמד בתור
 const SEEN_MS = 15000;      // כל שחקן מעדכן seenAt בתדירות הזו
 const GHOST_MS = 30000;     // שחקן שלא נראה זמן כזה נחשב שסגר את הטלפון
 
@@ -426,8 +425,10 @@ async function startRound({ reroll = false } = {}) {
   }
 
   // מי שלא היה אימפוסטר הרבה סיבובים מקבל סיכוי גבוה יותר: משקל (1 + סיבובים מאז)²
+  // שחקן בלי רשומה (הצטרף מאוחר / לא השתתף עד עכשיו) לא היה אימפוסטר אף פעם — מקבל את המשקל הגבוה ביותר
   const since = S.room.impSince || {};
-  const imp = weightedPick(ids, (u) => (1 + (since[u] || 0)) ** 2);
+  const maxSince = Math.max(0, ...Object.values(since));
+  const imp = weightedPick(ids, (u) => (1 + (since[u] ?? maxSince)) ** 2);
   const r = (S.room.round || 0) + 1;
   const b = writeBatch(db);
   ids.forEach((u) => b.set(subDoc("secrets", u), { round: r, q: u === imp ? pair.imp : pair.q }));

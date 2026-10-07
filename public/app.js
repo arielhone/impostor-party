@@ -9,7 +9,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, connectFirestoreEmulator, doc, collection, query, where,
-  getDoc, getDocs, getDocsFromServer, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, increment, serverTimestamp, deleteField,
+  getDoc, getDocs, getDocsFromServer, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, increment, serverTimestamp, deleteField, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig, USE_EMULATOR } from "./firebase-config.js";
 import { QUESTIONS } from "./questions.js";
@@ -46,12 +46,17 @@ const S = {
   renderPending: false, // רינדור שנדחה כי מישהו באמצע הקלדה
 };
 
-const BEAT_MS = 10000;      // תדירות פעימת המנהל
-const STALE_MS = 30000;     // אחרי כמה זמן בלי פעימה אפשר להשתלט (תואם ל-firestore.rules)const STAGGER_MS = 15000;   // השהיה נוספת לכל מועמד בתור
-const SEEN_MS = 15000;      // כל שחקן מעדכן seenAt בתדירות הזו
-const GHOST_MS = 30000;     // שחקן שלא נראה זמן כזה נחשב שסגר את הטלפון
+// הפעימות הן רוב הצריכה של מכסת Firestore (כל פעימה נקראת אצל כל השחקנים בחדר) — לכן מרווחים גדולים
+const BEAT_MS = 30000;      // תדירות פעימת המנהל
+const STALE_MS = 90000;     // אחרי כמה זמן בלי פעימה אפשר להשתלט (תואם ל-firestore.rules)
+const STAGGER_MS = 15000;   // השהיה נוספת לכל מועמד בתור
+const SEEN_MS = 45000;      // כל שחקן מעדכן seenAt בתדירות הזו
+const GHOST_MS = 90000;     // שחקן שלא נראה זמן כזה נחשב שסגר את הטלפון (תואם ל-firestore.rules)
 const DEFAULT_DISC_SEC = 120; // זמן דיון ברירת מחדל
 const MIN_DISC_MS = 30000;  // לפני זה עוברים להצבעה רק אם *כולם* מוכנים; אחרי זה מספיק רוב
+const TTL_MS = 24 * 3600 * 1000; // תוקף expireAt. המחיקה עצמה (TTL) דורשת תוכנית Blaze — כרגע כבויה, ראה README
+// חדר פעיל מאריך את התוקף בכל פעימה; חדר שכולם סגרו בו את הטלפון נמחק לבד
+const expireAt = () => Timestamp.fromMillis(Date.now() + TTL_MS);
 
 const $ = (s) => document.querySelector(s);
 const app = $("#app");
@@ -154,7 +159,9 @@ onAuthStateChanged(auth, async (user) => {
   S.me = user.uid;
   const urlCode = new URLSearchParams(location.search).get("room");
   const saved = safeGet("impostor:room");
-  const code = (urlCode || "").toUpperCase();
+  // נפתח מאייקון במסך הבית — אין קוד בכתובת, אז חוזרים לחדר האחרון שלא יצאנו ממנו
+  const installed = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const code = (urlCode || (installed ? saved : "") || "").toUpperCase();
   // חזרה אוטומטית לחדר אחרי רענון
   if (code && saved === code) {
     const ok = await tryRejoin(code);
@@ -187,10 +194,10 @@ async function createRoom(name) {
   if (!code) return toast("לא הצלחתי ליצור חדר. נסה שוב", "err");
   await setDoc(doc(db, "rooms", code), {
     hostUid: S.me, phase: "lobby", round: 0, participants: [],
-    discussionSec: DEFAULT_DISC_SEC, createdAt: Date.now(), result: null, normalQuestion: null, discussionEndsAt: null, discussionStartedAt: null,
-    hostSeenAt: serverTimestamp(),
+    discussionSec: DEFAULT_DISC_SEC, goal: "none", played: 0, createdAt: Date.now(), result: null, normalQuestion: null, discussionEndsAt: null, discussionStartedAt: null,
+    hostSeenAt: serverTimestamp(), expireAt: expireAt(),
   });
-  await setDoc(doc(db, "rooms", code, "players", S.me), { name, score: 0, joinedAt: Date.now(), seenAt: serverTimestamp() });
+  await setDoc(doc(db, "rooms", code, "players", S.me), { name, score: 0, joinedAt: Date.now(), seenAt: serverTimestamp(), expireAt: expireAt() });
   await enterRoom(code);
 }
 
@@ -200,8 +207,8 @@ async function joinRoom(code, name) {
   if (!snap.exists()) return toast("לא מצאתי חדר עם הקוד הזה", "err");
   const pRef = doc(db, "rooms", code, "players", S.me);
   const p = await getDoc(pRef);
-  if (p.exists()) await updateDoc(pRef, { name });
-  else await setDoc(pRef, { name, score: 0, joinedAt: Date.now(), seenAt: serverTimestamp() });
+  if (p.exists()) await updateDoc(pRef, { name, expireAt: expireAt() });
+  else await setDoc(pRef, { name, score: 0, joinedAt: Date.now(), seenAt: serverTimestamp(), expireAt: expireAt() });
   await enterRoom(code);
 }
 
@@ -325,14 +332,14 @@ async function closeRoom(code) {
 
 // ---------- העברת מנהל ----------
 function onlyHeartbeatChanged(a, b) {
-  const strip = ({ hostSeenAt, ...rest }) => JSON.stringify(rest);
+  const strip = ({ hostSeenAt, expireAt, ...rest }) => JSON.stringify(rest);
   return strip(a) === strip(b);
 }
 
-// מפתח השוואה לרשימת השחקנים בלי seenAt
+// מפתח השוואה לרשימת השחקנים בלי seenAt ו-expireAt (שמשתנים בכל פעימה)
 function playersKey(players) {
   return JSON.stringify(Object.keys(players).sort().map((u) => {
-    const { seenAt, ...rest } = players[u];
+    const { seenAt, expireAt, ...rest } = players[u];
     return [u, rest];
   }));
 }
@@ -350,7 +357,7 @@ function hostKeepalive() {
   const now = Date.now();
   if (now - S.lastSeenBeat >= SEEN_MS) {
     S.lastSeenBeat = now;
-    updateDoc(subDoc("players", S.me), { seenAt: serverTimestamp() }).catch((e) => console.error("seen", e));
+    updateDoc(subDoc("players", S.me), { seenAt: serverTimestamp(), expireAt: expireAt() }).catch((e) => console.error("seen", e));
   }
   // מישהו התחבר/נעלם — לרנדר כדי לעדכן "מחכים ל…"
   const aliveKey = Object.keys(S.players).filter(isAlive).sort().join();
@@ -358,7 +365,7 @@ function hostKeepalive() {
   if (isHost()) {
     if (now - S.lastBeat < BEAT_MS) return;
     S.lastBeat = now;
-    updateDoc(roomRef(), { hostSeenAt: serverTimestamp() }).catch((e) => console.error("beat", e));
+    updateDoc(roomRef(), { hostSeenAt: serverTimestamp(), expireAt: expireAt() }).catch((e) => console.error("beat", e));
     return;
   }
   const k = hostCandidates().indexOf(S.me);
@@ -378,7 +385,7 @@ function onPhaseChange(prev) {
     const a = $("#ansIn"); if (a) a.value = ""; // לא להשאיר תשובה לשאלה הקודמת
     if (prev === "answering") toast("המנהל החליף את השאלה. יש לך שאלה חדשה");
   }
-  if (ph === "discussion" || ph === "voting" || ph === "results") vibrate(ph === "results" ? 200 : 60);
+  if (["discussion", "voting", "results", "podium"].includes(ph)) vibrate(ph === "results" || ph === "podium" ? 200 : 60);
   if (PHASES_WITH_ANSWERS.includes(ph) && S.answers.round !== S.room.round) loadAnswers();
 }
 
@@ -404,7 +411,7 @@ async function submitAnswer(text) {
   text = text.trim();
   if (!text) return toast("כתוב תשובה לפני השליחה", "err");
   const r = S.room.round;
-  await setDoc(subDoc("answers", S.me), { round: r, text: text.slice(0, 80), name: nameOf(S.me), at: Date.now() });
+  await setDoc(subDoc("answers", S.me), { round: r, text: text.slice(0, 80), name: nameOf(S.me), at: Date.now(), expireAt: expireAt() });
   await updateDoc(subDoc("players", S.me), { answeredRound: r });
   vibrate();
 }
@@ -416,7 +423,7 @@ async function readyToVote() {
 async function submitVote() {
   if (!S.voteChoice) return toast("בחר את מי אתה חושד", "err");
   const r = S.room.round;
-  await setDoc(subDoc("votes", S.me), { round: r, target: S.voteChoice });
+  await setDoc(subDoc("votes", S.me), { round: r, target: S.voteChoice, expireAt: expireAt() });
   await updateDoc(subDoc("players", S.me), { votedRound: r });
   vibrate();
 }
@@ -464,6 +471,7 @@ const syncing = () => S.awaitSync && Date.now() - S.awaitSync < 16000;
 // reroll: החלפת שאלה באמצע שלב המענה — אותו מספר סיבוב בתצוגה
 async function startRound({ reroll = false } = {}) {
   // רק שחקנים מחוברים — מי שסגר את הטלפון לא נכנס לסיבוב ולא יכול להיות אימפוסטר
+  if (S.room.gameOver) return toast("המשחק נגמר. התחילו משחק חדש", "err");
   if (syncing()) return toast("מתחבר מחדש… נסה שוב בעוד רגע");
   const ids = Object.keys(S.players).filter(isAlive);
   if (ids.length < 3) return toast("צריך לפחות 3 שחקנים מחוברים", "err");
@@ -490,8 +498,8 @@ async function startRound({ reroll = false } = {}) {
   const imp = weightedPick(ids, (u) => (1 + (since[u] ?? maxSince)) ** 2);
   const r = (S.room.round || 0) + 1;
   const b = writeBatch(db);
-  ids.forEach((u) => b.set(subDoc("secrets", u), { round: r, q: u === imp ? pair.imp : pair.q }));
-  b.set(subDoc("hostOnly", "state"), { round: r, impostorUid: imp, normalQ: pair.q, impQ: pair.imp, usedQ: used });
+  ids.forEach((u) => b.set(subDoc("secrets", u), { round: r, q: u === imp ? pair.imp : pair.q, expireAt: expireAt() }));
+  b.set(subDoc("hostOnly", "state"), { round: r, impostorUid: imp, normalQ: pair.q, impQ: pair.imp, usedQ: used, expireAt: expireAt() });
   b.update(roomRef(), {
     phase: "answering", round: r, participants: ids, usedQ: deleteField(),
     skipped: (S.room.skipped || 0) + (reroll ? 1 : 0),
@@ -543,15 +551,34 @@ async function goResults() {
   const names = {};
   (S.room.participants || []).forEach((u) => (names[u] = nameOf(u)));
 
+  // סוף משחק: הגענו למספר הסיבובים, או שמישהו הגיע לניקוד היעד
+  const played = playedRounds() + 1;
+  const goal = parseGoal(S.room.goal);
+  const gameOver = goal?.type === "rounds" ? played >= goal.n
+    : goal?.type === "points" ? Object.keys(S.players).some((u) => (S.players[u].score || 0) + (delta[u] || 0) >= goal.n)
+    : false;
+
   const b = writeBatch(db);
   Object.entries(delta).forEach(([u, d]) => { if (S.players[u]) b.update(subDoc("players", u), { score: increment(d) }); });
   b.update(roomRef(), {
-    phase: "results", impSince,
+    phase: "results", impSince, played, gameOver,
     result: {
       votes, counts, eliminated, caught, tie: max > 0 && top.length > 1,
       impostorUid: hs.impostorUid, impostorQ: hs.impQ, normalQ: hs.normalQ, names, delta,
     },
   });
+  await b.commit();
+}
+
+async function showPodium() {
+  await updateDoc(roomRef(), { phase: "podium" });
+}
+
+// משחק חדש: מאפסים ניקוד וספירת סיבובים. impSince נשמר כדי שההגרלה תישאר הוגנת בין משחקים.
+async function newGame() {
+  const b = writeBatch(db);
+  Object.keys(S.players).forEach((u) => b.update(subDoc("players", u), { score: 0 }));
+  b.update(roomRef(), { phase: "lobby", participants: [], result: null, normalQuestion: null, played: 0, gameOver: false });
   await b.commit();
 }
 
@@ -628,7 +655,7 @@ function lobbyView() {
   </section>
   <section class="card">
     <h2>שחקנים (${n})</h2>
-    ${playerList({ showKick: host, showScores: S.room.round > 0 })}
+    ${playerList({ showKick: host, showScores: playedRounds() > 0 })}
   </section>
   ${host ? `
   <section class="card">
@@ -636,6 +663,11 @@ function lobbyView() {
     <label class="field inline"><span>זמן דיון</span>
       <select id="discSel" data-act="disc">
         ${[60, 120, 180, 240, 300].map((s) => `<option value="${s}" ${S.room.discussionSec === s ? "selected" : ""}>${s / 60} דק'</option>`).join("")}
+      </select>
+    </label>
+    <label class="field inline"><span>אורך משחק</span>
+      <select id="goalSel">
+        ${GOALS.map(([v, label]) => `<option value="${v}" ${(S.room.goal || "none") === v ? "selected" : ""}>${label}</option>`).join("")}
       </select>
     </label>
     <details class="custom">
@@ -646,7 +678,7 @@ function lobbyView() {
     </details>
   </section>
   <button class="btn primary big sticky" data-act="start" ${n < 3 ? "disabled" : ""}>
-    ${n < 3 ? `מחכים לעוד ${3 - n} שחקנים…` : S.room.round > 0 ? "▶ סיבוב הבא" : "▶ התחל משחק"}
+    ${n < 3 ? `מחכים לעוד ${3 - n} שחקנים…` : playedRounds() > 0 ? "▶ סיבוב הבא" : "▶ התחל משחק"}
   </button>` : `<p class="center-text muted pulse">מחכים שהמנהל יתחיל…</p>`}`;
 }
 
@@ -671,8 +703,25 @@ function progressBar(field) {
     <p class="muted small center-text">${p.done}/${p.total}${p.waiting.length && p.waiting.length <= 3 ? ` · מחכים ל: ${p.waiting.map((u) => esc(nameOf(u))).join(", ")}` : ""}</p>`;
 }
 
-// מספר הסיבוב לתצוגה (החלפות שאלה לא נספרות)
-const roundNo = () => S.room.round - (S.room.skipped || 0);
+// כמה סיבובים הסתיימו במשחק הנוכחי. חדר ישן בלי played: לפי מספר הסיבוב פחות החלפות שאלה.
+const playedRounds = () => S.room.played ?? Math.max(0, S.room.round - (S.room.skipped || 0) - 1);
+// מספר הסיבוב הנוכחי לתצוגה, עם היעד אם יש
+function roundNo() {
+  const goal = parseGoal(S.room.goal);
+  const n = playedRounds() + 1;
+  return goal?.type === "rounds" ? `${n} מתוך ${goal.n}` : goal?.type === "points" ? `${n} · עד ${goal.n} נק'` : n;
+}
+
+// אורך משחק: "none" | "rounds:N" | "points:N"
+const GOALS = [
+  ["none", "בלי הגבלה"],
+  ["rounds:5", "5 סיבובים"], ["rounds:8", "8 סיבובים"], ["rounds:10", "10 סיבובים"],
+  ["points:5", "ראשון ל-5 נקודות"], ["points:10", "ראשון ל-10 נקודות"],
+];
+function parseGoal(g) {
+  const [type, n] = String(g || "none").split(":");
+  return (type === "rounds" || type === "points") && Number(n) > 0 ? { type, n: Number(n) } : null;
+}
 
 function answeringView() {
   if (!inRound()) return waitingOutView();
@@ -812,10 +861,46 @@ function resultsView() {
     ${playerList({ showScores: true })}
   </section>
 
-  ${isHost() ? `<div class="row sticky">
+  ${S.room.gameOver ? `
+  <section class="card center-text reveal-4">
+    <div class="emoji">🏁</div>
+    <h2>זה היה הסיבוב האחרון</h2>
+  </section>
+  ${isHost()
+    ? `<button class="btn primary big sticky" data-act="podium">🏆 מי ניצח?</button>`
+    : `<p class="center-text muted pulse">המנהל יחשוף את המנצחים…</p>`}`
+  : isHost() ? `<div class="row sticky">
       <button class="btn primary big grow" data-act="start">▶ סיבוב הבא</button>
       <button class="btn ghost" data-act="lobby">ללובי</button>
     </div>` : `<p class="center-text muted">המנהל יתחיל סיבוב חדש…</p>`}`;
+}
+
+// מסך סיום: פודיום לשלושת הראשונים וטבלה מלאה. שוויון בניקוד = אותו מקום.
+function podiumView() {
+  const score = (u) => S.players[u].score || 0;
+  const ids = Object.keys(S.players).sort((a, b) => score(b) - score(a));
+  const place = {};
+  ids.forEach((u, i) => (place[u] = i && score(u) === score(ids[i - 1]) ? place[ids[i - 1]] : i + 1));
+  const winners = ids.filter((u) => place[u] === 1);
+  const step = (u, cls) => u ? `<div class="step ${cls}">
+      <span class="avatar" style="--h:${hue(u)}">${esc((S.players[u].name || "?")[0])}</span>
+      <div class="step-name">${esc(S.players[u].name)}</div>
+      <div class="step-block"><b>${place[u]}</b><span>${score(u)} נק'</span></div>
+    </div>` : "";
+  return `${header()}
+  <section class="card center-text reveal-1">
+    <div class="emoji">🏆</div>
+    <div class="muted">${winners.length > 1 ? "במקום הראשון, בתיקו" : "במקום הראשון"}</div>
+    <div class="winner-name">${winners.map((u) => esc(nameOf(u))).join(", ")}</div>
+  </section>
+  <div class="podium reveal-2">${step(ids[1], "second")}${step(ids[0], "first")}${step(ids[2], "third")}</div>
+  <section class="card reveal-3">
+    <h2>טבלה סופית</h2>
+    ${playerList({ showScores: true })}
+  </section>
+  ${isHost()
+    ? `<button class="btn primary big sticky" data-act="new-game">🔁 משחק חדש</button>`
+    : `<p class="center-text muted">המנהל יתחיל משחק חדש…</p>`}`;
 }
 
 function view() {
@@ -829,6 +914,7 @@ function view() {
     case "discussion": return discussionView();
     case "voting": return votingView();
     case "results": return resultsView();
+    case "podium": return podiumView();
     case "closing": return `<div class="center muted">החדר נסגר…</div>`;
   }
   return "";
@@ -925,6 +1011,11 @@ app.addEventListener("click", async (e) => {
       case "leave": await leaveRoom(); break;
       case "start": hostDo(startRound); break;
       case "lobby": hostDo(backToLobby); break;
+      case "podium": hostDo(showPodium); break;
+      case "new-game":
+        if (await ask({ title: "להתחיל משחק חדש?", text: "הניקוד של כולם יתאפס.", ok: "🔁 משחק חדש" })
+          && S.room?.phase === "podium") hostDo(newGame);
+        break;
       case "answer": await submitAnswer($("#ansIn")?.value || ""); break;
       case "force-reveal":
         if (await ask({ title: "לחשוף עכשיו?", text: "מי שעוד לא ענה יישאר בלי תשובה בסיבוב הזה.", ok: "חשוף" })
@@ -953,6 +1044,7 @@ app.addEventListener("click", async (e) => {
 
 app.addEventListener("change", (e) => {
   if (e.target.id === "discSel" && isHost()) updateDoc(roomRef(), { discussionSec: Number(e.target.value) });
+  if (e.target.id === "goalSel" && isHost()) updateDoc(roomRef(), { goal: e.target.value });
 });
 
 app.addEventListener("keydown", (e) => {

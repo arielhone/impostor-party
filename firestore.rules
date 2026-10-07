@@ -14,10 +14,10 @@ service cloud.firestore {
     function room(code) { return get(/databases/$(database)/documents/rooms/$(code)).data; }
     function isHost(code) { return signedIn() && room(code).hostUid == request.auth.uid; }
     function playerExists(code, uid) { return exists(/databases/$(database)/documents/rooms/$(code)/players/$(uid)); }
-    // שחקן ששלח פעימת "אני חי" (seenAt) ב-30 השניות האחרונות, לפי שעון השרת
+    // שחקן ששלח פעימת "אני חי" (seenAt) ב-90 השניות האחרונות, לפי שעון השרת
     function playerAlive(code, uid) {
       let p = get(/databases/$(database)/documents/rooms/$(code)/players/$(uid)).data;
-      return 'seenAt' in p && request.time < p.seenAt + duration.value(30, 's');
+      return 'seenAt' in p && request.time < p.seenAt + duration.value(90, 's');
     }
     // סגירת חדר: המנהל העביר את החדר לשלב closing ומוחק את כל התוכן
     function closing(code) { return isHost(code) && room(code).phase == 'closing'; }
@@ -33,14 +33,14 @@ service cloud.firestore {
           && (request.resource.data.hostUid == resource.data.hostUid
               || playerExists(code, request.resource.data.hostUid)))
         ||
-        // השתלטות: שחקן מחובר בחדר לוקח לעצמו את התפקיד, רק כשהמנהל יצא או לא מגיב 30 שניות.
+        // השתלטות: שחקן מחובר בחדר לוקח לעצמו את התפקיד, רק כשהמנהל יצא או לא מגיב 90 שניות.
         // (סדר התור בין המועמדים נקבע בלקוח בלבד — השרת לא אוכף אותו.)
         (request.resource.data.hostUid == request.auth.uid
           && playerAlive(code, request.auth.uid)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['hostUid', 'hostSeenAt'])
           && request.resource.data.hostSeenAt == request.time
           && (!playerExists(code, resource.data.hostUid)
-              || request.time > resource.data.hostSeenAt + duration.value(30, 's')))
+              || request.time > resource.data.hostSeenAt + duration.value(90, 's')))
       );
       // רק המנהל, ורק אחרי שהחדר עבר לשלב סגירה (והתוכן נמחק)
       allow delete: if signedIn() && resource.data.hostUid == request.auth.uid
@@ -54,7 +54,7 @@ service cloud.firestore {
         allow update: if isHost(code)
           || (signedIn() && request.auth.uid == uid
               && request.resource.data.diff(resource.data).affectedKeys()
-                   .hasOnly(['name', 'answeredRound', 'readyRound', 'votedRound', 'seenAt']));
+                   .hasOnly(['name', 'answeredRound', 'readyRound', 'votedRound', 'seenAt', 'expireAt']));
         allow delete: if isHost(code) || (signedIn() && request.auth.uid == uid);
       }
 

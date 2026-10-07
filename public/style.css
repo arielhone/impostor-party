@@ -141,6 +141,24 @@ input:focus, select:focus { border-color: var(--accent); }
 .votes li { font-size: .95rem; }
 .plus { color: var(--good); font-weight: 700; }
 
+/* ---------- podium ---------- */
+.winner-name { font-size: 2.2rem; font-weight: 900; color: var(--accent2); }
+.podium { display: flex; align-items: flex-end; justify-content: center; gap: 8px; padding-top: 8px; }
+.step { flex: 1; max-width: 140px; display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.step .avatar { width: 46px; height: 46px; font-size: 1.2rem; }
+.step-name { font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-block {
+  width: 100%; border-radius: 14px 14px 6px 6px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  background: var(--card); border: 1px solid var(--line);
+}
+.step-block b { font-size: 1.8rem; font-weight: 900; }
+.step-block span { color: var(--muted); font-size: .85rem; }
+.step.first .step-block { height: 130px; background: linear-gradient(180deg, #ffb84d33, var(--card)); border-color: var(--accent2); }
+.step.first .step-block b { color: var(--accent2); }
+.step.second .step-block { height: 96px; }
+.step.third .step-block { height: 72px; }
+
 .reveal-1, .reveal-2, .reveal-3, .reveal-4 { animation: rise .6s both; }
 .reveal-2 { animation-delay: 1.4s; }
 .reveal-3 { animation-delay: 2.4s; }

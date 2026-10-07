@@ -87,7 +87,32 @@ input:focus, select:focus { border-color: var(--accent); }
 .qr img, .qr canvas { background: #fff; padding: 8px; border-radius: 12px; }
 .round-tag { text-align: center; color: var(--accent2); font-weight: 700; }
 
+/* ---------- settings ---------- */
+.settings { display: flex; flex-direction: column; gap: 16px; }
+.settings h2 { margin-bottom: 0; }
+.setting { display: flex; flex-direction: column; gap: 8px; }
+.setting-label { font-size: .92rem; font-weight: 500; }
+.setting-hint { color: var(--muted); font-size: .8rem; margin-top: -2px; }
+.seg {
+  display: flex; gap: 4px; padding: 4px;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 14px;
+}
+.seg button {
+  flex: 1; min-width: 0; padding: 9px 4px;
+  font: inherit; font-size: .9rem; font-weight: 500; color: var(--muted);
+  background: transparent; border: none; border-radius: 10px; cursor: pointer;
+  white-space: nowrap; transition: background .15s, color .15s;
+}
+.seg button.on {
+  color: #fff; font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), #ff7a59);
+  box-shadow: 0 4px 12px -4px #ff4d6d88;
+}
+.seg + .seg { margin-top: 2px; }
+.seg + .seg button.on { background: var(--card); color: var(--accent2); box-shadow: inset 0 0 0 1px var(--accent2); }
+
 .custom summary { cursor: pointer; color: var(--muted); margin-top: 12px; }
+.settings .custom summary { margin-top: 0; }
 .custom input { margin-top: 8px; }
 
 /* ---------- player list ---------- */

@@ -53,7 +53,7 @@ const STAGGER_MS = 15000;   // השהיה נוספת לכל מועמד בתור
 const SEEN_MS = 45000;      // כל שחקן מעדכן seenAt בתדירות הזו
 const GHOST_MS = 90000;     // שחקן שלא נראה זמן כזה נחשב שסגר את הטלפון (תואם ל-firestore.rules)
 const DEFAULT_DISC_SEC = 120; // זמן דיון ברירת מחדל
-const MIN_DISC_MS = 30000;  // לפני זה עוברים להצבעה רק אם *כולם* מוכנים; אחרי זה מספיק רוב
+const DEFAULT_MIN_DISC_SEC = 30; // זמן דיון מינימלי ברירת מחדל (ניתן לשינוי בהגדרות)
 const TTL_MS = 24 * 3600 * 1000; // תוקף expireAt. המחיקה עצמה (TTL) דורשת תוכנית Blaze — כרגע כבויה, ראה README
 // חדר פעיל מאריך את התוקף בכל פעימה; חדר שכולם סגרו בו את הטלפון נמחק לבד
 const expireAt = () => Timestamp.fromMillis(Date.now() + TTL_MS);
@@ -194,7 +194,7 @@ async function createRoom(name) {
   if (!code) return toast("לא הצלחתי ליצור חדר. נסה שוב", "err");
   await setDoc(doc(db, "rooms", code), {
     hostUid: S.me, phase: "lobby", round: 0, participants: [],
-    discussionSec: DEFAULT_DISC_SEC, goal: "none", played: 0, createdAt: Date.now(), result: null, normalQuestion: null, discussionEndsAt: null, discussionStartedAt: null,
+    discussionSec: DEFAULT_DISC_SEC, minDiscSec: DEFAULT_MIN_DISC_SEC, goal: "none", played: 0, createdAt: Date.now(), result: null, normalQuestion: null, discussionEndsAt: null, discussionStartedAt: null,
     hostSeenAt: serverTimestamp(), expireAt: expireAt(),
   });
   await setDoc(doc(db, "rooms", code, "players", S.me), { name, score: 0, joinedAt: Date.now(), seenAt: serverTimestamp(), expireAt: expireAt() });
@@ -463,7 +463,9 @@ function hostTick() {
 // כמה זמן עבר מתחילת הדיון. חדר שהתחיל דיון לפני שנוסף discussionStartedAt — מחשבים מהטיימר.
 const discElapsed = () => Date.now() -
   (S.room.discussionStartedAt ?? S.room.discussionEndsAt - (S.room.discussionSec || DEFAULT_DISC_SEC) * 1000);
-const discEarly = () => discElapsed() < MIN_DISC_MS;
+// לפני הזמן המינימלי עוברים להצבעה רק אם *כולם* מוכנים; אחריו מספיק רוב. 0 = כבוי.
+const minDiscSec = () => S.room.minDiscSec ?? DEFAULT_MIN_DISC_SEC;
+const discEarly = () => discElapsed() < minDiscSec() * 1000;
 
 // אחרי שהטאב הוקפא ברקע, נתוני "מי מחובר" ישנים — מחכים לעדכון טרי (עד 16 שניות, סבב פעימות אחד)
 const syncing = () => S.awaitSync && Date.now() - S.awaitSync < 16000;
@@ -658,18 +660,9 @@ function lobbyView() {
     ${playerList({ showKick: host, showScores: playedRounds() > 0 })}
   </section>
   ${host ? `
-  <section class="card">
+  <section class="card settings">
     <h2>הגדרות</h2>
-    <label class="field inline"><span>זמן דיון</span>
-      <select id="discSel" data-act="disc">
-        ${[60, 120, 180, 240, 300].map((s) => `<option value="${s}" ${S.room.discussionSec === s ? "selected" : ""}>${s / 60} דק'</option>`).join("")}
-      </select>
-    </label>
-    <label class="field inline"><span>אורך משחק</span>
-      <select id="goalSel">
-        ${GOALS.map(([v, label]) => `<option value="${v}" ${(S.room.goal || "none") === v ? "selected" : ""}>${label}</option>`).join("")}
-      </select>
-    </label>
+    ${settingsView()}
     <details class="custom">
       <summary>✍️ זוג שאלות משלכם (אופציונלי)</summary>
       <input id="customQ" maxlength="120" placeholder="השאלה של כולם" />
@@ -679,7 +672,64 @@ function lobbyView() {
   </section>
   <button class="btn primary big sticky" data-act="start" ${n < 3 ? "disabled" : ""}>
     ${n < 3 ? `מחכים לעוד ${3 - n} שחקנים…` : playedRounds() > 0 ? "▶ סיבוב הבא" : "▶ התחל משחק"}
-  </button>` : `<p class="center-text muted pulse">מחכים שהמנהל יתחיל…</p>`}`;
+  </button>` : `<p class="center-text muted small">${esc(settingsSummary())}</p>
+  <p class="center-text muted pulse">מחכים שהמנהל יתחיל…</p>`}`;
+}
+
+// ---------- הגדרות (רק המנהל) ----------
+// כפתורי בחירה במקום רשימות נפתחות: כל האפשרויות גלויות, לחיצה אחת בוחרת
+const DISC_MAX = [60, 120, 180, 240, 300];     // זמן דיון מקסימלי (שניות)
+const DISC_MIN = [0, 15, 30, 60];              // זמן מינימלי לפני מעבר ברוב (שניות), 0 = כבוי
+const GOAL_NUMS = { rounds: [5, 8, 10], points: [10, 15, 20] };
+const GOAL_DEFAULT = { rounds: 8, points: 15 };
+
+function seg(key, options, current) {
+  return `<div class="seg" role="radiogroup">${options.map(([val, label]) =>
+    `<button type="button" role="radio" aria-checked="${val === current}" class="${val === current ? "on" : ""}"
+      data-act="set" data-key="${key}" data-val="${val}">${label}</button>`).join("")}</div>`;
+}
+
+function settingsView() {
+  const goal = parseGoal(S.room.goal);
+  const type = goal?.type || "none";
+  return `
+    <div class="setting">
+      <div class="setting-label">⏱️ זמן דיון <span class="muted">(דקות)</span></div>
+      ${seg("discussionSec", DISC_MAX.map((s) => [String(s), String(s / 60)]), String(S.room.discussionSec || DEFAULT_DISC_SEC))}
+    </div>
+    <div class="setting">
+      <div class="setting-label">⏳ זמן מינימלי <span class="muted">(שניות)</span></div>
+      ${seg("minDiscSec", DISC_MIN.map((s) => [String(s), s ? String(s) : "כבוי"]), String(minDiscSec()))}
+      <div class="setting-hint">${minDiscSec()
+        ? "עד אז צריך שכולם יהיו מוכנים, אחר כך מספיק רוב"
+        : "עוברים להצבעה ברגע שרוב השחקנים מוכנים"}</div>
+    </div>
+    <div class="setting">
+      <div class="setting-label">🏁 אורך משחק</div>
+      ${seg("goalType", [["none", "בלי הגבלה"], ["rounds", "סיבובים"], ["points", "נקודות"]], type)}
+      ${goal ? seg("goalN", GOAL_NUMS[type].map((n) => [String(n), type === "rounds" ? `${n}` : `עד ${n}`]), String(goal.n)) : ""}
+    </div>`;
+}
+
+// שורה קצרה לשחקנים שאינם המנהל: מה נבחר
+function settingsSummary() {
+  const goal = parseGoal(S.room.goal);
+  const min = minDiscSec();
+  return [
+    `דיון עד ${(S.room.discussionSec || DEFAULT_DISC_SEC) / 60} דק'`,
+    min ? `מינימום ${min} שנ'` : "",
+    goal?.type === "rounds" ? `${goal.n} סיבובים` : goal?.type === "points" ? `עד ${goal.n} נקודות` : "בלי הגבלת סיבובים",
+  ].filter(Boolean).join(" · ");
+}
+
+function applySetting(key, val) {
+  const goal = parseGoal(S.room.goal);
+  if (key === "discussionSec" || key === "minDiscSec") return updateDoc(roomRef(), { [key]: Number(val) });
+  if (key === "goalType") {
+    if (val === (goal?.type || "none")) return;
+    return updateDoc(roomRef(), { goal: val === "none" ? "none" : `${val}:${GOAL_DEFAULT[val]}` });
+  }
+  if (key === "goalN" && goal) return updateDoc(roomRef(), { goal: `${goal.type}:${val}` });
 }
 
 function waitingOutView() {
@@ -713,11 +763,6 @@ function roundNo() {
 }
 
 // אורך משחק: "none" | "rounds:N" | "points:N"
-const GOALS = [
-  ["none", "בלי הגבלה"],
-  ["rounds:5", "5 סיבובים"], ["rounds:8", "8 סיבובים"], ["rounds:10", "10 סיבובים"],
-  ["points:5", "ראשון ל-5 נקודות"], ["points:10", "ראשון ל-10 נקודות"],
-];
 function parseGoal(g) {
   const [type, n] = String(g || "none").split(":");
   return (type === "rounds" || type === "points") && Number(n) > 0 ? { type, n: Number(n) } : null;
@@ -793,7 +838,7 @@ function discussionView() {
 // מה צריך כדי לעבור להצבעה לפני שהטיימר נגמר
 function discHint() {
   return discEarly()
-    ? `מעבר מוקדם להצבעה רק אם <b>כולם</b> מוכנים · עוד ${fmt(MIN_DISC_MS - discElapsed())} יספיק רוב`
+    ? `מעבר מוקדם להצבעה רק אם <b>כולם</b> מוכנים · עוד ${fmt(minDiscSec() * 1000 - discElapsed())} יספיק רוב`
     : `עוברים להצבעה כש<b>רוב</b> השחקנים מוכנים`;
 }
 
@@ -1010,6 +1055,7 @@ app.addEventListener("click", async (e) => {
       case "kick": await kick(el.dataset.uid); break;
       case "leave": await leaveRoom(); break;
       case "start": hostDo(startRound); break;
+      case "set": if (isHost() && S.room?.phase === "lobby") await applySetting(el.dataset.key, el.dataset.val); break;
       case "lobby": hostDo(backToLobby); break;
       case "podium": hostDo(showPodium); break;
       case "new-game":
@@ -1040,11 +1086,6 @@ app.addEventListener("click", async (e) => {
     toast(errText(err), "err");
     el.disabled = false;
   }
-});
-
-app.addEventListener("change", (e) => {
-  if (e.target.id === "discSel" && isHost()) updateDoc(roomRef(), { discussionSec: Number(e.target.value) });
-  if (e.target.id === "goalSel" && isHost()) updateDoc(roomRef(), { goal: e.target.value });
 });
 
 app.addEventListener("keydown", (e) => {
